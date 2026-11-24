@@ -25,6 +25,7 @@ Secrets it reads (Streamlit's secrets box online, or environment variables local
 """
 
 import base64
+import calendar
 import inspect
 import os
 import secrets as pyrandom
@@ -94,6 +95,8 @@ def apply_style():
     .stButton button[kind^="primary"] p, .stFormSubmitButton button[kind^="primary"] p { color: #FDFADA !important; }
     .stButton button:hover, .stFormSubmitButton button:hover { border-color: #AE834A !important; }
     .stButton button:hover p, .stFormSubmitButton button:hover p { color: #AE834A !important; }
+    /* Switched-off buttons look faded so it's clear they can't be pressed */
+    .stButton button:disabled { opacity: .3; cursor: not-allowed; }
 
     /* Input boxes */
     .stTextInput input, .stDateInput input, .stTextArea textarea, [data-baseweb="select"] > div {
@@ -109,6 +112,23 @@ def apply_style():
     .when { font-family: 'Cormorant Garamond', serif; font-size: 1.45rem; font-weight: 700;
             margin: 6px 0 0; }
     .muted { color: #6b6b6b; font-size: .85rem; }
+
+    /* Small month calendars on the request-off page */
+    .cal { background: #fff; border: 1px solid #e7dfb8; border-radius: 16px;
+           padding: 10px 8px 6px; margin-bottom: 10px; }
+    .cal-title { font-family: 'Cormorant Garamond', serif; font-weight: 700;
+                 font-size: 1.15rem; text-align: center; margin-bottom: 4px; }
+    .cal table { width: 100%; border-collapse: collapse; table-layout: fixed; border: none; }
+    .cal th, .cal td { border: none !important; padding: 2px; text-align: center; }
+    .cal th { font-size: .7rem; color: #6b6b6b; font-weight: 600; }
+    .cal-day { border-radius: 8px; padding: 5px 0; font-size: .85rem; }
+    .cal-black { background: #070909; color: #FDFADA; font-weight: 700;
+                 text-decoration: line-through; }
+    .cal-closed, .cal-past { color: #c4c4c4; }
+    .cal-today { outline: 2px solid #AE834A; }
+    .cal-key { font-size: .75rem; color: #6b6b6b; margin: -4px 0 12px; }
+    .cal-key span { display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+                    vertical-align: -1px; margin: 0 4px 0 10px; }
 
     /* Tabs (manager screen) in gold */
     .stTabs [aria-selected="true"] { color: #AE834A !important; }
@@ -239,6 +259,46 @@ def blackout_line(b):
     return f"{text} ({b['label']})" if b.get("label") else text
 
 
+def blackout_days(blackouts):
+    """Every single blacked-out date, e.g. {date(2026,12,31): 'NYE', ...}."""
+    days = {}
+    for b in blackouts:
+        d, end = date.fromisoformat(b["start_date"]), date.fromisoformat(b["end_date"])
+        while d <= end:
+            days[d] = b.get("label") or "Blackout"
+            d += timedelta(1)
+    return days
+
+
+def month_calendar(year, month, blacked):
+    """Draw one month as a small calendar. Blackout days are black,
+    closed days (Sun/Mon) and past days are faded."""
+    cal = calendar.Calendar(firstweekday=6)  # weeks start on Sunday
+    cells = []
+    for week in cal.monthdatescalendar(year, month):
+        row = []
+        for d in week:
+            if d.month != month:
+                row.append('<td></td>')
+                continue
+            style = "cal-day"
+            title = ""
+            if d in blacked:
+                style += " cal-black"
+                title = f' title="{escape(blacked[d])}"'
+            elif d.weekday() not in OPEN_DAYS:
+                style += " cal-closed"
+            elif d < date.today():
+                style += " cal-past"
+            if d == date.today():
+                style += " cal-today"
+            row.append(f'<td><div class="{style}"{title}>{d.day}</div></td>')
+        cells.append("<tr>" + "".join(row) + "</tr>")
+    head = "".join(f"<th>{x}</th>" for x in ("S", "M", "T", "W", "T", "F", "S"))
+    return (f'<div class="cal"><div class="cal-title">{date(year, month, 1):%B %Y}</div>'
+            f'<table><tr>{head}</tr>{"".join(cells)}</table></div>')
+
+
 def make_first_manager():
     """If nobody is a manager yet, create the first manager login from the secrets."""
     if run("SELECT id FROM employees WHERE role = 'manager'", fetch=True):
@@ -297,7 +357,7 @@ def email_managers(subject, body):
     app_pw = get_secret("GMAIL_APP_PASSWORD").replace(" ", "")
     to = get_secret("ALERT_TO")
     if not (user and app_pw and to):
-        st.info("(Email alerts are not set up on this copy, so no alert was sent.)")
+        notice("info", "(Email alerts are not set up on this copy, so no alert was sent.)")
         return
     link = get_secret("APP_URL")
     msg = EmailMessage()
@@ -312,7 +372,17 @@ def email_managers(subject, body):
             s.send_message(msg)
     except Exception as e:
         # The request is already saved; managers will still see it when they log in.
-        st.warning(f"Your request was saved, but the alert email to the manager failed: {e}")
+        notice("warning", f"Your request was saved, but the alert email to the manager failed: {e}")
+
+
+def notice(kind, text):
+    """Save a message to show at the top of the next screen, so it survives a page refresh."""
+    st.session_state.setdefault("notices", []).append((kind, text))
+
+
+def show_notices():
+    for kind, text in st.session_state.pop("notices", []):
+        getattr(st, kind)(text)
 
 
 # ---------------------------------------------------------------------------
@@ -487,34 +557,53 @@ def page_request_off(user):
     back_button()
     st.markdown("## Request a day off")
     blackouts = upcoming_blackouts()
+
+    # This month and next, with blackout days blacked out so staff see them first.
+    blacked = blackout_days(blackouts)
+    this_month = date.today().replace(day=1)
+    next_month = (this_month + timedelta(32)).replace(day=1)
+    st.markdown(month_calendar(this_month.year, this_month.month, blacked) +
+                month_calendar(next_month.year, next_month.month, blacked) +
+                '<div class="cal-key"><span style="background:#070909"></span>Blackout — no requests off'
+                '<span style="background:#e2e2e2"></span>Closed</div>', unsafe_allow_html=True)
     if blackouts:
-        st.warning("**Blackout days — no requests off:**  \n" +
-                   "  \n".join(escape(blackout_line(b)) for b in blackouts))
-    with st.form("off_form", clear_on_submit=True):
+        st.markdown('<p class="muted"><b>Blackout days:</b> ' +
+                    "; ".join(escape(blackout_line(b)) for b in blackouts) + "</p>",
+                    unsafe_allow_html=True)
+
+    # The boxes are checked the moment a date is picked, not only when Send is pressed.
+    # "round" gives fresh, empty boxes after each request is sent.
+    rnd = st.session_state.get("off_round", 0)
+    with st.container(border=True):
         first = st.date_input("First day off", value=next_open_day(), min_value=date.today(),
-                              format="MM/DD/YYYY")
+                              format="MM/DD/YYYY", key=f"off_first{rnd}")
         last = st.date_input("Last day off (same day if just one)", value=next_open_day(),
-                             min_value=date.today(), format="MM/DD/YYYY")
-        reason = st.text_input("Reason (optional)")
-        if st.form_submit_button("Send to manager", type="primary", width="stretch"):
-            if last < first:
-                st.error("Last day is before the first day.")
-            elif not any((first + timedelta(n)).weekday() in OPEN_DAYS
-                         for n in range((last - first).days + 1)):
-                st.error("We're closed Sundays and Mondays — pick a Tuesday through Saturday.")
-            elif hits := [b for b in blackouts if b["start_date"] <= last.isoformat()
-                          and b["end_date"] >= first.isoformat()]:
-                # At least one picked day falls inside a blackout: refuse, save nothing.
-                st.error("Those dates include a blackout — no requests off: " +
-                         "; ".join(blackout_line(b) for b in hits))
-            else:
-                req = dict(kind="off", start_date=first.isoformat(), end_date=last.isoformat(),
-                           employee_id=user["id"], coworker_id=None, reason=reason.strip())
-                run("INSERT INTO requests (kind, start_date, end_date, employee_id, reason, "
-                    "status, created_at) VALUES ('off', %s, %s, %s, %s, 'waiting_joe', %s)",
-                    (req["start_date"], req["end_date"], user["id"], req["reason"], now_text()))
-                email_managers(f"Request off: {user['name']} {nice_range(req)}", describe(req))
-                st.success("Sent. A manager will approve or deny it — check My requests.")
+                             min_value=date.today(), format="MM/DD/YYYY", key=f"off_last{rnd}")
+        problem = ""
+        if last < first:
+            problem = "Last day is before the first day."
+        elif not any((first + timedelta(n)).weekday() in OPEN_DAYS
+                     for n in range((last - first).days + 1)):
+            problem = "We're closed Sundays and Mondays — pick a Tuesday through Saturday."
+        elif hits := [b for b in blackouts if b["start_date"] <= last.isoformat()
+                      and b["end_date"] >= first.isoformat()]:
+            problem = ("That's a blackout — no requests off: " +
+                       "; ".join(blackout_line(b) for b in hits))
+        if problem:
+            st.error(problem)
+        reason = st.text_input("Reason (optional)", key=f"off_reason{rnd}")
+        # Send stays switched off while the dates have a problem, so nothing gets saved.
+        if st.button("Send to manager", type="primary", width="stretch",
+                     disabled=bool(problem), key=f"off_send{rnd}"):
+            req = dict(kind="off", start_date=first.isoformat(), end_date=last.isoformat(),
+                       employee_id=user["id"], coworker_id=None, reason=reason.strip())
+            run("INSERT INTO requests (kind, start_date, end_date, employee_id, reason, "
+                "status, created_at) VALUES ('off', %s, %s, %s, %s, 'waiting_joe', %s)",
+                (req["start_date"], req["end_date"], user["id"], req["reason"], now_text()))
+            email_managers(f"Request off: {user['name']} {nice_range(req)}", describe(req))
+            notice("success", "Sent. A manager will approve or deny it — check My requests.")
+            st.session_state.off_round = rnd + 1
+            st.rerun()
 
 
 def page_trade(user):
@@ -761,6 +850,7 @@ if "user_id" in st.session_state:
     rows = run("SELECT * FROM employees WHERE id = %s", (st.session_state.user_id,), fetch=True)
     user = rows[0] if rows and rows[0]["active"] else None
 
+show_notices()
 if user is None:
     login_screen()
 else:
