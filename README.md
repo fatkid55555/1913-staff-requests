@@ -22,7 +22,7 @@ and approve or deny on the Manager screen.
 
 ## Logging in
 - **Staff:** pick their name from the list, type the 4-digit code a manager gave them.
-- **Managers:** tap "Manager login" at the bottom, real username + password.
+- **Managers:** tap "Manager login" at the bottom, pick your name, type your password.
   Add another manager on Manager screen → Staff → Add a manager (they pick
   their own password on first login). Alert emails go to every address in
   the `ALERT_TO` secret, comma-separated.

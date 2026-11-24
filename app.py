@@ -403,18 +403,21 @@ def login_screen():
                 st.error(message)
 
     with st.expander("Manager login"):
+        # Managers pick their name from a list instead of typing a username.
+        managers = run("SELECT * FROM employees WHERE role = 'manager' AND active = 1 "
+                       "ORDER BY name", fetch=True)
         with st.form("manager_login"):
-            username = st.text_input("Username").strip().lower()
+            picked_mgr = st.selectbox("Manager", [m["name"] for m in managers], index=None,
+                                      placeholder="Pick your name")
             password = st.text_input("Password", type="password")
             if st.form_submit_button("Log in as manager", width="stretch"):
-                rows = run("SELECT * FROM employees WHERE username = %s AND role = 'manager' "
-                           "AND active = 1", (username,), fetch=True)
-                if not rows:
-                    st.error("Wrong username or password.")
+                if picked_mgr is None:
+                    st.error("Pick your name first.")
                 else:
-                    ok, message = try_login(rows[0], password)
+                    person = next(m for m in managers if m["name"] == picked_mgr)
+                    ok, message = try_login(person, password)
                     if ok:
-                        st.session_state.user_id = rows[0]["id"]
+                        st.session_state.user_id = person["id"]
                         go("home")
                     st.error(message)
 
@@ -647,29 +650,30 @@ def manager_screen(user):
 
         # --- Managers: anyone here can approve/deny and manage staff ---------
         st.markdown("#### Managers")
-        managers = run("SELECT name, username FROM employees WHERE role = 'manager' "
+        managers = run("SELECT name FROM employees WHERE role = 'manager' "
                        "AND active = 1 ORDER BY name", fetch=True)
-        st.markdown('<p class="muted">' + ", ".join(
-            f"{escape(m['name'])} ({escape(m['username'])})" for m in managers) + "</p>",
-            unsafe_allow_html=True)
+        st.markdown('<p class="muted">' + ", ".join(escape(m["name"]) for m in managers)
+                    + "</p>", unsafe_allow_html=True)
         with st.expander("Add a manager"):
             with st.form("add_manager", clear_on_submit=True):
-                m_name = st.text_input("Their name").strip()
-                m_user = st.text_input("Username they'll log in with").strip().lower()
+                m_name = st.text_input("Their name (as it shows in the login list)").strip()
                 m_pw = st.text_input("Temporary password (8+ characters)", type="password")
                 st.markdown('<p class="muted">They pick their own password the first time '
                             'they log in.</p>', unsafe_allow_html=True)
                 if st.form_submit_button("Add manager", type="primary"):
-                    if not (m_name and m_user):
-                        st.error("Fill in a name and a username.")
+                    if not m_name:
+                        st.error("Fill in their name.")
                     elif len(m_pw) < 8:
                         st.error("Temporary password needs at least 8 characters.")
-                    elif run("SELECT id FROM employees WHERE username = %s", (m_user,), fetch=True):
-                        st.error("That username is taken. Pick another.")
+                    elif run("SELECT id FROM employees WHERE role = 'manager' AND active = 1 "
+                             "AND lower(name) = lower(%s)", (m_name,), fetch=True):
+                        st.error("There's already a manager with that name. Use a different one.")
                     else:
+                        # A hidden username keeps every row unique; nobody types it.
+                        m_user = "mgr-" + pyrandom.token_hex(4)
                         run("INSERT INTO employees (name, username, pw_hash, role, must_change_pw) "
                             "VALUES (%s, %s, %s, 'manager', 1)", (m_name, m_user, scramble(m_pw)))
-                        st.success(f"{m_name} can now use Manager login as '{m_user}'.")
+                        st.success(f"{m_name} can now pick their name under Manager login.")
 
         with st.expander("Change my manager password"):
             change_password_form(user, forced=False)
