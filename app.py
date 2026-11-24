@@ -28,6 +28,7 @@ import base64
 import calendar
 import inspect
 import os
+import re
 import secrets as pyrandom
 import smtplib
 import sqlite3
@@ -35,6 +36,7 @@ import ssl
 import tempfile
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
+from email.utils import formataddr
 from html import escape
 
 import bcrypt
@@ -271,6 +273,14 @@ def create_tables():
             end_date TEXT NOT NULL,
             label TEXT
         )""")
+    # Each person's email for request updates (optional). Older databases get it added here.
+    if USING_ONLINE_DB:
+        run("ALTER TABLE employees ADD COLUMN IF NOT EXISTS email TEXT")
+    else:
+        try:
+            run("ALTER TABLE employees ADD COLUMN email TEXT")
+        except sqlite3.OperationalError:
+            pass  # already added
 
 
 def upcoming_blackouts():
@@ -412,28 +422,82 @@ def try_login(person, secret):
 # ---------------------------------------------------------------------------
 # Alert email to the managers
 # ---------------------------------------------------------------------------
-def email_managers(subject, body):
-    """Send the managers an alert. If email isn't set up, just say so on screen."""
+# Where staff replies go when they hit Reply on any email from the site.
+REPLY_TO = "jpascolla@1913roselle.com"
+SENDER_NAME = "1913 Staff Requests"
+
+
+def send_email(to, subject, body, link_text="", reply_to=None):
+    """Send one email through the site's Gmail. Returns None if it went out,
+    otherwise a short note saying what went wrong."""
     user = get_secret("GMAIL_USER")
     app_pw = get_secret("GMAIL_APP_PASSWORD").replace(" ", "")
-    to = get_secret("ALERT_TO")
-    if not (user and app_pw and to):
-        notice("info", "(Email alerts are not set up on this copy, so no alert was sent.)")
-        return
+    if not (user and app_pw):
+        return "NOT SET UP"
     link = get_secret("APP_URL")
     msg = EmailMessage()
-    msg["From"] = user
+    msg["From"] = formataddr((SENDER_NAME, user))  # shows as "1913 Staff Requests"
     msg["To"] = to
+    if reply_to:
+        msg["Reply-To"] = reply_to
     msg["Subject"] = subject
-    msg.set_content(body + (f"\n\nApprove or deny: {link}" if link else ""))
+    msg.set_content(body + (f"\n\n{link_text}: {link}" if link and link_text else ""))
     try:
         ctx = ssl.create_default_context()
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx, timeout=30) as s:
             s.login(user, app_pw)
             s.send_message(msg)
+        return None
     except Exception as e:
+        return str(e)
+
+
+def email_managers(subject, body):
+    """Send the managers an alert. If email isn't set up, just say so on screen."""
+    to = get_secret("ALERT_TO")
+    problem = send_email(to, subject, body, link_text="Approve or deny") if to else "NOT SET UP"
+    if problem == "NOT SET UP":
+        notice("info", "(Email alerts are not set up on this copy, so no alert was sent.)")
+    elif problem:
         # The request is already saved; managers will still see it when they log in.
-        notice("warning", f"Your request was saved, but the alert email to the manager failed: {e}")
+        notice("warning", f"Your request was saved, but the alert email to the manager failed: {problem}")
+
+
+def email_staff(emp_id, subject, body):
+    """Email one staff member, if they've given us an email. Quietly skips if they haven't."""
+    rows = run("SELECT name, email FROM employees WHERE id = %s", (emp_id,), fetch=True)
+    if not rows or not rows[0].get("email"):
+        return
+    problem = send_email(rows[0]["email"], subject, body, link_text="Open 1913 Staff Requests",
+                         reply_to=REPLY_TO)
+    if problem == "NOT SET UP":
+        notice("info", f"(Email to {rows[0]['name']} skipped — email isn't set up on this copy.)")
+    elif problem:
+        notice("warning", f"Saved, but the email to {rows[0]['name']} didn't go out: {problem}")
+
+
+def looks_like_email(text):
+    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", text))
+
+
+def save_email(emp_id, name, email):
+    """Store someone's email and send them a 'you're set up' message to prove it works.
+    Returns (ok, message) for the screen."""
+    run("UPDATE employees SET email = %s WHERE id = %s", (email, emp_id))
+    problem = send_email(
+        email, "You're set up for 1913 request updates",
+        f"Hi {name.split()[0]},\n\nYou'll now get an email from 1913 Staff Requests when:\n"
+        "  - a manager approves or denies your request\n"
+        "  - a coworker offers you a shift\n"
+        "  - a coworker answers your shift offer\n\n"
+        "If you didn't set this up, just reply to this email.",
+        link_text="Open 1913 Staff Requests", reply_to=REPLY_TO)
+    if problem == "NOT SET UP":
+        return True, "Email saved. (Test email skipped — email isn't set up on this copy.)"
+    if problem:
+        return False, f"Email saved, but the test email didn't go out — check the spelling. ({problem})"
+    return True, ("Email saved. We just sent a test email — if it isn't there in a few minutes, "
+                  "check spam or the spelling.")
 
 
 def notice(kind, text):
@@ -612,6 +676,31 @@ def staff_home(user):
         go("offers")
     if st.button("📋  My requests", width="stretch"):
         go("mine")
+    email_label = "✉️  Email updates: on" if user.get("email") else "✉️  Get email updates"
+    if st.button(email_label, width="stretch"):
+        go("email")
+
+
+def page_email(user):
+    back_button()
+    st.markdown("## Email updates")
+    st.markdown('<p class="muted">Get an email when a manager approves or denies your request, '
+                'when a coworker offers you a shift, and when someone answers your shift offer.</p>',
+                unsafe_allow_html=True)
+    current = user.get("email") or ""
+    with st.form("email_form"):
+        new = st.text_input("Your email", value=current, placeholder="you@example.com").strip()
+        if st.form_submit_button("Save", type="primary", width="stretch"):
+            if not looks_like_email(new):
+                st.error("That doesn't look like an email address.")
+            else:
+                ok, message = save_email(user["id"], user["name"], new)
+                notice("success" if ok else "warning", message)
+                st.rerun()
+    if current and st.button("Stop email updates", width="stretch"):
+        run("UPDATE employees SET email = NULL WHERE id = %s", (user["id"],))
+        notice("success", "Email updates turned off.")
+        st.rerun()
 
 
 def page_request_off(user):
@@ -689,7 +778,13 @@ def page_trade(user):
                 "'waiting_coworker', %s)",
                 (shift.isoformat(), shift.isoformat(), user["id"], names[who],
                  note.strip(), now_text()))
-            st.success(f"Offer sent to {who}. Tell them to log in and accept it.")
+            when = nice_date(shift.isoformat())
+            email_staff(names[who], f"{user['name']} offered you a shift: {when}",
+                        f"{user['name']} wants you to take their shift on {when}."
+                        + (f'\nTheir note: "{note.strip()}"' if note.strip() else "")
+                        + "\n\nLog in and tap \"Shifts offered to me\" to accept or decline.")
+            notice("success", f"Offer sent to {who}. They have to accept it before it goes to a manager.")
+            st.rerun()
 
 
 def page_offers(user):
@@ -707,10 +802,16 @@ def page_offers(user):
                 run("UPDATE requests SET status = 'waiting_joe' WHERE id = %s", (req["id"],))
                 email_managers(f"Shift trade: {name_of(req['employee_id'])} → {user['name']} "
                           f"{nice_range(req)}", describe(req) + f"\n{user['name']} accepted.")
+                email_staff(req["employee_id"], f"{user['name']} accepted your shift: {nice_range(req)}",
+                            f"{user['name']} said yes to taking your shift on {nice_range(req)}.\n\n"
+                            "It now goes to a manager to approve. You'll get another email when they decide.")
                 st.rerun()
             if col_no.button("Decline", key=f"dec{req['id']}", width="stretch"):
                 run("UPDATE requests SET status = 'coworker_declined', decided_at = %s "
                     "WHERE id = %s", (now_text(), req["id"]))
+                email_staff(req["employee_id"], f"{user['name']} declined your shift: {nice_range(req)}",
+                            f"{user['name']} said no to taking your shift on {nice_range(req)}.\n\n"
+                            "The shift is still yours. You can offer it to someone else.")
                 st.rerun()
 
 
@@ -735,6 +836,24 @@ def page_mine(user):
 # ---------------------------------------------------------------------------
 # Manager screen
 # ---------------------------------------------------------------------------
+def tell_staff_decision(req, status, note):
+    """Email the staff involved once a manager approves or denies."""
+    word = "APPROVED" if status == "approved" else "DENIED"
+    note_line = f'\n\nNote from the manager: "{note}"' if note else ""
+    when = nice_range(req)
+    if req["kind"] == "off":
+        email_staff(req["employee_id"], f"Your request off {when}: {word.title()}",
+                    f"Your request off for {when} was {word}.{note_line}")
+    else:
+        giver, taker = name_of(req["employee_id"]), name_of(req["coworker_id"])
+        result = (f"{taker} is working it." if status == "approved"
+                  else f"The shift stays with {giver}.")
+        for emp_id in (req["employee_id"], req["coworker_id"]):
+            email_staff(emp_id, f"Shift trade {when}: {word.title()}",
+                        f"The shift trade on {when} — {taker} taking {giver}'s shift — "
+                        f"was {word}. {result}{note_line}")
+
+
 def manager_screen(user):
     pending = run("SELECT * FROM requests WHERE status = 'waiting_joe' ORDER BY start_date",
                   fetch=True)
@@ -795,6 +914,7 @@ def manager_screen(user):
                     if col.button(label, key=f"{status}{req['id']}", type=style, width="stretch"):
                         run("UPDATE requests SET status = %s, manager_note = %s, decided_at = %s "
                             "WHERE id = %s", (status, note.strip(), now_text(), req["id"]))
+                        tell_staff_decision(req, status, note.strip())
                         st.rerun()
 
     # --- History ------------------------------------------------------------
@@ -845,8 +965,23 @@ def manager_screen(user):
                     fetch=True)
         for emp in staff:
             locked = emp["locked_until"] and emp["locked_until"] > now_text()
-            label = emp["name"] + ("" if emp["active"] else " — turned off") + (" 🔒" if locked else "")
+            label = (emp["name"] + (" ✉️" if emp.get("email") else "")
+                     + ("" if emp["active"] else " — turned off") + (" 🔒" if locked else ""))
             with st.expander(label):
+                # Their email for request updates — managers can add or fix it for them.
+                new_email = st.text_input("Email for updates (blank = none)", value=emp.get("email") or "",
+                                          key=f"email{emp['id']}").strip()
+                if st.button("Save email", key=f"saveemail{emp['id']}"):
+                    if not new_email:
+                        run("UPDATE employees SET email = NULL WHERE id = %s", (emp["id"],))
+                        notice("success", f"Email removed for {emp['name']}.")
+                        st.rerun()
+                    elif not looks_like_email(new_email):
+                        st.error("That doesn't look like an email address.")
+                    else:
+                        ok, message = save_email(emp["id"], emp["name"], new_email)
+                        notice("success" if ok else "warning", f"{emp['name']}: {message}")
+                        st.rerun()
                 new_code = st.text_input("New 4-digit code", max_chars=4, key=f"code{emp['id']}")
                 col_save, col_toggle = st.columns(2)
                 if col_save.button("Save code", key=f"save{emp['id']}", width="stretch"):
@@ -929,7 +1064,7 @@ else:
     else:
         page = st.session_state.get("page", "home")
         {"home": staff_home, "off": page_request_off, "trade": page_trade,
-         "offers": page_offers, "mine": page_mine}.get(page, staff_home)(user)
+         "offers": page_offers, "mine": page_mine, "email": page_email}.get(page, staff_home)(user)
 
     # Log out sits at the bottom of every screen.
     st.divider()
