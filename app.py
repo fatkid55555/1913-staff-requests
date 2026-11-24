@@ -25,6 +25,7 @@ Secrets it reads (Streamlit's secrets box online, or environment variables local
 """
 
 import base64
+import inspect
 import os
 import secrets as pyrandom
 import smtplib
@@ -739,15 +740,18 @@ def manager_screen(user):
 # Start here
 # ---------------------------------------------------------------------------
 @st.cache_resource
-def setup_once():
-    """Check the tables and first manager once when the site starts, not on every tap."""
+def setup_once(setup_code):
+    """Check the tables and first manager once, not on every tap.
+    It's handed the text of create_tables(), so whenever an update changes
+    the tables (like adding blackouts), setup runs again on its own —
+    no reboot needed."""
     create_tables()
     make_first_manager()
     return True
 
 
 apply_style()
-setup_once()
+setup_once(inspect.getsource(create_tables))
 
 if not USING_ONLINE_DB:
     st.warning("TEST COPY — using a throwaway file on this computer, not the real database.")
