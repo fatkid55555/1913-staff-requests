@@ -116,34 +116,37 @@ def apply_style():
     /* Tap calendar on the request-off page.
        Streamlit normally stacks side-by-side boxes on phones; these rules keep
        the calendar 7 days across on any screen. */
-    .st-key-offcal [data-testid="stHorizontalBlock"], .st-key-offnav [data-testid="stHorizontalBlock"] {
+    [class*="offcal"] [data-testid="stHorizontalBlock"], [class*="offnav"] [data-testid="stHorizontalBlock"] {
         flex-wrap: nowrap !important; gap: 4px !important; }
-    .st-key-offcal, .st-key-offcal [data-testid="stVerticalBlock"] { gap: 4px !important; }
-    .st-key-offcal [data-testid="stMarkdownContainer"] { margin-bottom: 0 !important; }
-    .st-key-offcal .stMarkdown p { margin: 0 !important; }
-    .st-key-offnav [data-testid="stColumn"] { min-width: 0 !important; }
-    .st-key-offnav .stButton button { min-height: 2.4rem !important; font-size: 1.2rem; }
-    .st-key-offnav .stButton button:disabled { opacity: .25; }
-    .st-key-offcal [data-testid="stColumn"] {
+    [class*="offcal"], [class*="offcal"] [data-testid="stVerticalBlock"] { gap: 4px !important; }
+    [class*="offcal"] [data-testid="stMarkdownContainer"] { margin-bottom: 0 !important; }
+    [class*="offcal"] .stMarkdown p { margin: 0 !important; }
+    [class*="offnav"] [data-testid="stColumn"] { min-width: 0 !important; }
+    [class*="offnav"] .stButton button { min-height: 2.4rem !important; font-size: 1.2rem; }
+    [class*="offnav"] .stButton button:disabled { opacity: .25; }
+    [class*="offcal"] [data-testid="stColumn"] {
         min-width: 0 !important; flex: 1 1 0 !important; width: auto !important; }
-    .st-key-offcal .stButton button {
+    [class*="offcal"] .stButton button {
         min-height: 2.6rem !important; padding: 0 !important; border-radius: 10px !important;
         border: 1px solid #e7dfb8 !important; width: 100%; }
-    .st-key-offcal .stButton button p { font-size: .9rem !important; font-weight: 600; }
+    [class*="offcal"] .stButton button p { font-size: .9rem !important; font-weight: 600; }
     /* Picked days: gold */
-    .st-key-offcal .stButton button[kind="primary"] {
+    [class*="offcal"] .stButton button[kind="primary"] {
         background: #AE834A !important; border-color: #AE834A !important; }
-    .st-key-offcal .stButton button[kind="primary"] p { color: #fff !important; }
+    [class*="offcal"] .stButton button[kind="primary"] p { color: #fff !important; }
     /* Blackout days: black, crossed out, can't be tapped */
-    .st-key-offcal .stButton button[kind="tertiary"] {
+    [class*="offcal"] .stButton button[kind="tertiary"] {
         background: #070909 !important; border-color: #070909 !important; opacity: 1 !important; }
-    .st-key-offcal .stButton button[kind="tertiary"] p {
+    [class*="offcal"] .stButton button[kind="tertiary"] p {
         color: #FDFADA !important; text-decoration: line-through; }
     /* Closed / past days: faded, can't be tapped */
-    .st-key-offcal .stButton button[kind="secondary"]:disabled {
+    [class*="offcal"] .stButton button[kind="secondary"]:disabled {
         opacity: 1; background: transparent !important; border-color: transparent !important; }
-    .st-key-offcal .stButton button[kind="secondary"]:disabled p { color: #cfcfcf !important; }
-    .st-key-offcal .stButton button:not(:disabled):hover { border-color: #AE834A !important; }
+    [class*="offcal"] .stButton button[kind="secondary"]:disabled p { color: #cfcfcf !important; }
+    [class*="offcal"] .stButton button:not(:disabled):hover { border-color: #AE834A !important; }
+    [class*="st-key-blkrow"] [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }
+    [class*="st-key-blkrow"] [data-testid="stColumn"] { min-width: 0 !important; }
+    [class*="st-key-blkrow"] .stButton button p { white-space: nowrap; }
     .cal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px;
                 text-align: center; font-size: .7rem; color: #6b6b6b; font-weight: 600;
                 padding-bottom: 2px; line-height: 1.4; }
@@ -293,39 +296,48 @@ def blackout_days(blackouts):
     return days
 
 
-def pick_day(d):
-    """What happens when a staff member taps a day on the calendar.
-    First tap = first day off. Second tap = last day off.
-    A third tap starts over."""
-    start, end = st.session_state.get("pick_start"), st.session_state.get("pick_end")
+def pick_day(d, who=""):
+    """What happens when someone taps a day on the calendar.
+    First tap = first day. Second tap = last day. A third tap starts over.
+    'who' keeps the staff calendar and the manager blackout calendar separate."""
+    start, end = st.session_state.get(who + "pick_start"), st.session_state.get(who + "pick_end")
     if start is None or end is not None or d < start:
-        st.session_state.pick_start, st.session_state.pick_end = d, None
+        st.session_state[who + "pick_start"], st.session_state[who + "pick_end"] = d, None
     else:
-        st.session_state.pick_end = d
+        st.session_state[who + "pick_end"] = d
 
 
-def shift_month(step):
-    m = st.session_state.cal_month
+def picked_days(who=""):
+    """(first, last) the person has tapped, or (None, None)."""
+    first = st.session_state.get(who + "pick_start")
+    return first, st.session_state.get(who + "pick_end") or first
+
+
+def clear_picks(who=""):
+    st.session_state[who + "pick_start"] = st.session_state[who + "pick_end"] = None
+
+
+def shift_month(step, who=""):
+    m = st.session_state[who + "cal_month"]
     m = (m + timedelta(32)).replace(day=1) if step > 0 else (m - timedelta(1)).replace(day=1)
-    st.session_state.cal_month = m
+    st.session_state[who + "cal_month"] = m
 
 
-def tap_calendar(blacked):
+def tap_calendar(blacked, who="", picked_label="Your days off"):
     """One month of tappable days, with arrows to change months.
     Blackout days are black and can't be tapped; closed and past days are faded."""
     first_month = date.today().replace(day=1)
-    month = st.session_state.setdefault("cal_month", first_month)
-    start = st.session_state.get("pick_start")
-    end = st.session_state.get("pick_end") or start
+    month = st.session_state.setdefault(who + "cal_month", first_month)
+    start, end = picked_days(who)
     # Month name with arrows to go back and forward
-    with st.container(key="offnav"):
+    with st.container(key=who + "offnav"):
         prev, title, nxt = st.columns([1, 4, 1], vertical_alignment="center")
-        prev.button("‹", key="cal_prev", on_click=shift_month, args=(-1,),
+        prev.button("‹", key=who + "cal_prev", on_click=shift_month, args=(-1, who),
                     disabled=month <= first_month, width="stretch")
         title.markdown(f'<div class="cal-month">{month:%B %Y}</div>', unsafe_allow_html=True)
-        nxt.button("›", key="cal_next", on_click=shift_month, args=(1,), width="stretch")
+        nxt.button("›", key=who + "cal_next", on_click=shift_month, args=(1, who), width="stretch")
     # The days, 7 across
-    with st.container(key="offcal"):
+    with st.container(key=who + "offcal"):
         st.markdown('<div class="cal-week"><div>S</div><div>M</div><div>T</div><div>W</div>'
                     '<div>T</div><div>F</div><div>S</div></div>', unsafe_allow_html=True)
         for week in calendar.Calendar(firstweekday=6).monthdatescalendar(month.year, month.month):
@@ -333,7 +345,7 @@ def tap_calendar(blacked):
             for col, d in zip(cols, week):
                 if d.month != month.month:
                     continue  # leave the box empty for days from other months
-                key = f"day{d:%Y%m%d}"
+                key = f"{who}day{d:%Y%m%d}"
                 if d in blacked:
                     col.button(str(d.day), key=key, type="tertiary", disabled=True,
                                help=blacked[d], width="stretch")
@@ -342,8 +354,8 @@ def tap_calendar(blacked):
                 else:
                     picked = start is not None and start <= d <= end
                     col.button(str(d.day), key=key, type="primary" if picked else "secondary",
-                               on_click=pick_day, args=(d,), width="stretch")
-    st.markdown('<div class="cal-key"><span style="background:#AE834A"></span>Your days off'
+                               on_click=pick_day, args=(d, who), width="stretch")
+    st.markdown(f'<div class="cal-key"><span style="background:#AE834A"></span>{picked_label}'
                 '<span style="background:#070909"></span>Blackout — no requests off</div>',
                 unsafe_allow_html=True)
 
@@ -615,8 +627,7 @@ def page_request_off(user):
                     "; ".join(escape(blackout_line(b)) for b in blackouts) + "</p>",
                     unsafe_allow_html=True)
 
-    first = st.session_state.get("pick_start")
-    last = st.session_state.get("pick_end") or first
+    first, last = picked_days()
     with st.container(border=True):
         if first is None:
             st.markdown('<p class="muted">No days picked yet.</p>', unsafe_allow_html=True)
@@ -632,7 +643,7 @@ def page_request_off(user):
                            "; ".join(blackout_line(b) for b in hits))
                 st.error(problem)
             if st.button("Clear", key="pick_clear"):
-                st.session_state.pick_start = st.session_state.pick_end = None
+                clear_picks()
                 st.rerun()
         rnd = st.session_state.get("off_round", 0)
         reason = st.text_input("Reason (optional)", key=f"off_reason{rnd}")
@@ -646,7 +657,7 @@ def page_request_off(user):
                 (req["start_date"], req["end_date"], user["id"], req["reason"], now_text()))
             email_managers(f"Request off: {user['name']} {nice_range(req)}", describe(req))
             notice("success", "Sent. A manager will approve or deny it — check My requests.")
-            st.session_state.pick_start = st.session_state.pick_end = None
+            clear_picks()
             st.session_state.off_round = rnd + 1
             st.rerun()
 
@@ -735,24 +746,36 @@ def manager_screen(user):
     with tab_blackout:
         st.markdown('<p class="muted">Staff can\'t request these days off. '
                     'Shift trades are still allowed.</p>', unsafe_allow_html=True)
-        with st.form("add_blackout", clear_on_submit=True):
-            b_first = st.date_input("First day", value=date.today(), min_value=date.today(),
-                                    format="MM/DD/YYYY")
-            b_last = st.date_input("Last day (same day if just one)", value=date.today(),
-                                   min_value=date.today(), format="MM/DD/YYYY")
-            b_label = st.text_input("Label (optional) — e.g. NYE, Valentine's")
-            if st.form_submit_button("Add blackout", type="primary"):
-                if b_last < b_first:
-                    st.error("Last day is before the first day.")
-                else:
-                    run("INSERT INTO blackouts (start_date, end_date, label) VALUES (%s, %s, %s)",
-                        (b_first.isoformat(), b_last.isoformat(), b_label.strip()))
-                    st.success("Blackout added.")
+        st.markdown('<p class="muted">Tap the first day, then the last day. '
+                    'One day? Just tap it once.</p>', unsafe_allow_html=True)
+        tap_calendar(blackout_days(upcoming_blackouts()), who="blk_", picked_label="New blackout")
+        b_first, b_last = picked_days("blk_")
+        with st.container(border=True):
+            if b_first is None:
+                st.markdown('<p class="muted">No days picked yet.</p>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="when">Black out: '
+                            f'{nice_range(dict(start_date=b_first.isoformat(), end_date=b_last.isoformat()))}'
+                            f'</div>', unsafe_allow_html=True)
+                if st.button("Clear", key="blk_clear"):
+                    clear_picks("blk_")
+                    st.rerun()
+            b_round = st.session_state.get("blk_round", 0)
+            b_label = st.text_input("Label (optional) — e.g. NYE, Valentine's", key=f"blk_label{b_round}")
+            if st.button("Add blackout", type="primary", disabled=b_first is None, key="blk_add"):
+                run("INSERT INTO blackouts (start_date, end_date, label) VALUES (%s, %s, %s)",
+                    (b_first.isoformat(), b_last.isoformat(), b_label.strip()))
+                notice("success", "Blackout added.")
+                clear_picks("blk_")
+                st.session_state.blk_round = b_round + 1
+                st.rerun()
         blackouts = upcoming_blackouts()
         if not blackouts:
             st.write("No blackout days coming up.")
         for b in blackouts:
-            col_text, col_btn = st.columns([3, 1])
+            # Keep the date and its Remove button on one line, even on phones
+            col_text, col_btn = st.container(key=f"blkrow{b['id']}").columns(
+                [2, 1], vertical_alignment="center")
             col_text.markdown(f"**{escape(blackout_line(b))}**")
             if col_btn.button("Remove", key=f"unblack{b['id']}", width="stretch"):
                 run("DELETE FROM blackouts WHERE id = %s", (b["id"],))
