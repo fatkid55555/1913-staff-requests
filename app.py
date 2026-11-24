@@ -216,6 +216,26 @@ def create_tables():
             created_at TEXT NOT NULL,
             decided_at TEXT
         )""")
+    # Days (or stretches of days) nobody can request off. Trades are still allowed.
+    run(f"""
+        CREATE TABLE IF NOT EXISTS blackouts (
+            id {id_col},
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            label TEXT
+        )""")
+
+
+def upcoming_blackouts():
+    """Blackouts that haven't ended yet, soonest first."""
+    return run("SELECT * FROM blackouts WHERE end_date >= %s ORDER BY start_date",
+               (date.today().isoformat(),), fetch=True)
+
+
+def blackout_line(b):
+    """'Thu, Dec 31 (NYE)' — one blackout in plain words."""
+    text = nice_range(b)
+    return f"{text} ({b['label']})" if b.get("label") else text
 
 
 def make_first_manager():
@@ -465,6 +485,10 @@ def staff_home(user):
 def page_request_off(user):
     back_button()
     st.markdown("## Request a day off")
+    blackouts = upcoming_blackouts()
+    if blackouts:
+        st.warning("**Blackout days — no requests off:**  \n" +
+                   "  \n".join(escape(blackout_line(b)) for b in blackouts))
     with st.form("off_form", clear_on_submit=True):
         first = st.date_input("First day off", value=next_open_day(), min_value=date.today(),
                               format="MM/DD/YYYY")
@@ -477,6 +501,11 @@ def page_request_off(user):
             elif not any((first + timedelta(n)).weekday() in OPEN_DAYS
                          for n in range((last - first).days + 1)):
                 st.error("We're closed Sundays and Mondays — pick a Tuesday through Saturday.")
+            elif hits := [b for b in blackouts if b["start_date"] <= last.isoformat()
+                          and b["end_date"] >= first.isoformat()]:
+                # At least one picked day falls inside a blackout: refuse, save nothing.
+                st.error("Those dates include a blackout — no requests off: " +
+                         "; ".join(blackout_line(b) for b in hits))
             else:
                 req = dict(kind="off", start_date=first.isoformat(), end_date=last.isoformat(),
                            employee_id=user["id"], coworker_id=None, reason=reason.strip())
@@ -564,8 +593,35 @@ def manager_screen(user):
     pending = run("SELECT * FROM requests WHERE status = 'waiting_joe' ORDER BY start_date",
                   fetch=True)
     st.markdown("## Manager")
-    tab_pending, tab_all, tab_staff = st.tabs(
-        [f"Waiting on you ({len(pending)})", "History", "Staff"])
+    tab_pending, tab_all, tab_blackout, tab_staff = st.tabs(
+        [f"Waiting on you ({len(pending)})", "History", "Blackout days", "Staff"])
+
+    # --- Blackout days: dates nobody can request off --------------------------
+    with tab_blackout:
+        st.markdown('<p class="muted">Staff can\'t request these days off. '
+                    'Shift trades are still allowed.</p>', unsafe_allow_html=True)
+        with st.form("add_blackout", clear_on_submit=True):
+            b_first = st.date_input("First day", value=date.today(), min_value=date.today(),
+                                    format="MM/DD/YYYY")
+            b_last = st.date_input("Last day (same day if just one)", value=date.today(),
+                                   min_value=date.today(), format="MM/DD/YYYY")
+            b_label = st.text_input("Label (optional) — e.g. NYE, Valentine's")
+            if st.form_submit_button("Add blackout", type="primary"):
+                if b_last < b_first:
+                    st.error("Last day is before the first day.")
+                else:
+                    run("INSERT INTO blackouts (start_date, end_date, label) VALUES (%s, %s, %s)",
+                        (b_first.isoformat(), b_last.isoformat(), b_label.strip()))
+                    st.success("Blackout added.")
+        blackouts = upcoming_blackouts()
+        if not blackouts:
+            st.write("No blackout days coming up.")
+        for b in blackouts:
+            col_text, col_btn = st.columns([3, 1])
+            col_text.markdown(f"**{escape(blackout_line(b))}**")
+            if col_btn.button("Remove", key=f"unblack{b['id']}", width="stretch"):
+                run("DELETE FROM blackouts WHERE id = %s", (b["id"],))
+                st.rerun()
 
     # --- Requests waiting on a manager----------------------------------------
     with tab_pending:
