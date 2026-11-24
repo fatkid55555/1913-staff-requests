@@ -113,20 +113,43 @@ def apply_style():
             margin: 6px 0 0; }
     .muted { color: #6b6b6b; font-size: .85rem; }
 
-    /* Small month calendars on the request-off page */
-    .cal { background: #fff; border: 1px solid #e7dfb8; border-radius: 16px;
-           padding: 10px 8px 6px; margin-bottom: 10px; }
-    .cal-title { font-family: 'Cormorant Garamond', serif; font-weight: 700;
-                 font-size: 1.15rem; text-align: center; margin-bottom: 4px; }
-    .cal table { width: 100%; border-collapse: collapse; table-layout: fixed; border: none; }
-    .cal th, .cal td { border: none !important; padding: 2px; text-align: center; }
-    .cal th { font-size: .7rem; color: #6b6b6b; font-weight: 600; }
-    .cal-day { border-radius: 8px; padding: 5px 0; font-size: .85rem; }
-    .cal-black { background: #070909; color: #FDFADA; font-weight: 700;
-                 text-decoration: line-through; }
-    .cal-closed, .cal-past { color: #c4c4c4; }
-    .cal-today { outline: 2px solid #AE834A; }
-    .cal-key { font-size: .75rem; color: #6b6b6b; margin: -4px 0 12px; }
+    /* Tap calendar on the request-off page.
+       Streamlit normally stacks side-by-side boxes on phones; these rules keep
+       the calendar 7 days across on any screen. */
+    .st-key-offcal [data-testid="stHorizontalBlock"], .st-key-offnav [data-testid="stHorizontalBlock"] {
+        flex-wrap: nowrap !important; gap: 4px !important; }
+    .st-key-offcal, .st-key-offcal [data-testid="stVerticalBlock"] { gap: 4px !important; }
+    .st-key-offcal [data-testid="stMarkdownContainer"] { margin-bottom: 0 !important; }
+    .st-key-offcal .stMarkdown p { margin: 0 !important; }
+    .st-key-offnav [data-testid="stColumn"] { min-width: 0 !important; }
+    .st-key-offnav .stButton button { min-height: 2.4rem !important; font-size: 1.2rem; }
+    .st-key-offnav .stButton button:disabled { opacity: .25; }
+    .st-key-offcal [data-testid="stColumn"] {
+        min-width: 0 !important; flex: 1 1 0 !important; width: auto !important; }
+    .st-key-offcal .stButton button {
+        min-height: 2.6rem !important; padding: 0 !important; border-radius: 10px !important;
+        border: 1px solid #e7dfb8 !important; width: 100%; }
+    .st-key-offcal .stButton button p { font-size: .9rem !important; font-weight: 600; }
+    /* Picked days: gold */
+    .st-key-offcal .stButton button[kind="primary"] {
+        background: #AE834A !important; border-color: #AE834A !important; }
+    .st-key-offcal .stButton button[kind="primary"] p { color: #fff !important; }
+    /* Blackout days: black, crossed out, can't be tapped */
+    .st-key-offcal .stButton button[kind="tertiary"] {
+        background: #070909 !important; border-color: #070909 !important; opacity: 1 !important; }
+    .st-key-offcal .stButton button[kind="tertiary"] p {
+        color: #FDFADA !important; text-decoration: line-through; }
+    /* Closed / past days: faded, can't be tapped */
+    .st-key-offcal .stButton button[kind="secondary"]:disabled {
+        opacity: 1; background: transparent !important; border-color: transparent !important; }
+    .st-key-offcal .stButton button[kind="secondary"]:disabled p { color: #cfcfcf !important; }
+    .st-key-offcal .stButton button:not(:disabled):hover { border-color: #AE834A !important; }
+    .cal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px;
+                text-align: center; font-size: .7rem; color: #6b6b6b; font-weight: 600;
+                padding-bottom: 2px; line-height: 1.4; }
+    .cal-month { font-family: 'Cormorant Garamond', serif; font-weight: 700; white-space: nowrap;
+                 font-size: 1.3rem; text-align: center; padding-top: .3rem; }
+    .cal-key { font-size: .75rem; color: #6b6b6b; margin: 2px 0 6px; }
     .cal-key span { display: inline-block; width: 12px; height: 12px; border-radius: 3px;
                     vertical-align: -1px; margin: 0 4px 0 10px; }
 
@@ -270,33 +293,59 @@ def blackout_days(blackouts):
     return days
 
 
-def month_calendar(year, month, blacked):
-    """Draw one month as a small calendar. Blackout days are black,
-    closed days (Sun/Mon) and past days are faded."""
-    cal = calendar.Calendar(firstweekday=6)  # weeks start on Sunday
-    cells = []
-    for week in cal.monthdatescalendar(year, month):
-        row = []
-        for d in week:
-            if d.month != month:
-                row.append('<td></td>')
-                continue
-            style = "cal-day"
-            title = ""
-            if d in blacked:
-                style += " cal-black"
-                title = f' title="{escape(blacked[d])}"'
-            elif d.weekday() not in OPEN_DAYS:
-                style += " cal-closed"
-            elif d < date.today():
-                style += " cal-past"
-            if d == date.today():
-                style += " cal-today"
-            row.append(f'<td><div class="{style}"{title}>{d.day}</div></td>')
-        cells.append("<tr>" + "".join(row) + "</tr>")
-    head = "".join(f"<th>{x}</th>" for x in ("S", "M", "T", "W", "T", "F", "S"))
-    return (f'<div class="cal"><div class="cal-title">{date(year, month, 1):%B %Y}</div>'
-            f'<table><tr>{head}</tr>{"".join(cells)}</table></div>')
+def pick_day(d):
+    """What happens when a staff member taps a day on the calendar.
+    First tap = first day off. Second tap = last day off.
+    A third tap starts over."""
+    start, end = st.session_state.get("pick_start"), st.session_state.get("pick_end")
+    if start is None or end is not None or d < start:
+        st.session_state.pick_start, st.session_state.pick_end = d, None
+    else:
+        st.session_state.pick_end = d
+
+
+def shift_month(step):
+    m = st.session_state.cal_month
+    m = (m + timedelta(32)).replace(day=1) if step > 0 else (m - timedelta(1)).replace(day=1)
+    st.session_state.cal_month = m
+
+
+def tap_calendar(blacked):
+    """One month of tappable days, with arrows to change months.
+    Blackout days are black and can't be tapped; closed and past days are faded."""
+    first_month = date.today().replace(day=1)
+    month = st.session_state.setdefault("cal_month", first_month)
+    start = st.session_state.get("pick_start")
+    end = st.session_state.get("pick_end") or start
+    # Month name with arrows to go back and forward
+    with st.container(key="offnav"):
+        prev, title, nxt = st.columns([1, 4, 1], vertical_alignment="center")
+        prev.button("‹", key="cal_prev", on_click=shift_month, args=(-1,),
+                    disabled=month <= first_month, width="stretch")
+        title.markdown(f'<div class="cal-month">{month:%B %Y}</div>', unsafe_allow_html=True)
+        nxt.button("›", key="cal_next", on_click=shift_month, args=(1,), width="stretch")
+    # The days, 7 across
+    with st.container(key="offcal"):
+        st.markdown('<div class="cal-week"><div>S</div><div>M</div><div>T</div><div>W</div>'
+                    '<div>T</div><div>F</div><div>S</div></div>', unsafe_allow_html=True)
+        for week in calendar.Calendar(firstweekday=6).monthdatescalendar(month.year, month.month):
+            cols = st.columns(7)
+            for col, d in zip(cols, week):
+                if d.month != month.month:
+                    continue  # leave the box empty for days from other months
+                key = f"day{d:%Y%m%d}"
+                if d in blacked:
+                    col.button(str(d.day), key=key, type="tertiary", disabled=True,
+                               help=blacked[d], width="stretch")
+                elif d < date.today() or d.weekday() not in OPEN_DAYS:
+                    col.button(str(d.day), key=key, disabled=True, width="stretch")
+                else:
+                    picked = start is not None and start <= d <= end
+                    col.button(str(d.day), key=key, type="primary" if picked else "secondary",
+                               on_click=pick_day, args=(d,), width="stretch")
+    st.markdown('<div class="cal-key"><span style="background:#AE834A"></span>Your days off'
+                '<span style="background:#070909"></span>Blackout — no requests off</div>',
+                unsafe_allow_html=True)
 
 
 def make_first_manager():
@@ -558,43 +607,38 @@ def page_request_off(user):
     st.markdown("## Request a day off")
     blackouts = upcoming_blackouts()
 
-    # This month and next, with blackout days blacked out so staff see them first.
-    blacked = blackout_days(blackouts)
-    this_month = date.today().replace(day=1)
-    next_month = (this_month + timedelta(32)).replace(day=1)
-    st.markdown(month_calendar(this_month.year, this_month.month, blacked) +
-                month_calendar(next_month.year, next_month.month, blacked) +
-                '<div class="cal-key"><span style="background:#070909"></span>Blackout — no requests off'
-                '<span style="background:#e2e2e2"></span>Closed</div>', unsafe_allow_html=True)
+    st.markdown('<p class="muted">Tap your first day off, then your last day off. '
+                'One day? Just tap it once.</p>', unsafe_allow_html=True)
+    tap_calendar(blackout_days(blackouts))
     if blackouts:
         st.markdown('<p class="muted"><b>Blackout days:</b> ' +
                     "; ".join(escape(blackout_line(b)) for b in blackouts) + "</p>",
                     unsafe_allow_html=True)
 
-    # The boxes are checked the moment a date is picked, not only when Send is pressed.
-    # "round" gives fresh, empty boxes after each request is sent.
-    rnd = st.session_state.get("off_round", 0)
+    first = st.session_state.get("pick_start")
+    last = st.session_state.get("pick_end") or first
     with st.container(border=True):
-        first = st.date_input("First day off", value=next_open_day(), min_value=date.today(),
-                              format="MM/DD/YYYY", key=f"off_first{rnd}")
-        last = st.date_input("Last day off (same day if just one)", value=next_open_day(),
-                             min_value=date.today(), format="MM/DD/YYYY", key=f"off_last{rnd}")
-        problem = ""
-        if last < first:
-            problem = "Last day is before the first day."
-        elif not any((first + timedelta(n)).weekday() in OPEN_DAYS
-                     for n in range((last - first).days + 1)):
-            problem = "We're closed Sundays and Mondays — pick a Tuesday through Saturday."
-        elif hits := [b for b in blackouts if b["start_date"] <= last.isoformat()
-                      and b["end_date"] >= first.isoformat()]:
-            problem = ("That's a blackout — no requests off: " +
-                       "; ".join(blackout_line(b) for b in hits))
-        if problem:
-            st.error(problem)
+        if first is None:
+            st.markdown('<p class="muted">No days picked yet.</p>', unsafe_allow_html=True)
+            problem = "pick"
+        else:
+            picked = dict(start_date=first.isoformat(), end_date=last.isoformat())
+            st.markdown(f'<div class="when">Off: {nice_range(picked)}</div>', unsafe_allow_html=True)
+            problem = ""
+            # A range can run across a blackout even though the blackout day itself can't be tapped.
+            if hits := [b for b in blackouts if b["start_date"] <= last.isoformat()
+                        and b["end_date"] >= first.isoformat()]:
+                problem = ("Those days run into a blackout — no requests off: " +
+                           "; ".join(blackout_line(b) for b in hits))
+                st.error(problem)
+            if st.button("Clear", key="pick_clear"):
+                st.session_state.pick_start = st.session_state.pick_end = None
+                st.rerun()
+        rnd = st.session_state.get("off_round", 0)
         reason = st.text_input("Reason (optional)", key=f"off_reason{rnd}")
-        # Send stays switched off while the dates have a problem, so nothing gets saved.
+        # Send stays switched off until good days are picked, so nothing bad gets saved.
         if st.button("Send to manager", type="primary", width="stretch",
-                     disabled=bool(problem), key=f"off_send{rnd}"):
+                     disabled=bool(problem), key="off_send"):
             req = dict(kind="off", start_date=first.isoformat(), end_date=last.isoformat(),
                        employee_id=user["id"], coworker_id=None, reason=reason.strip())
             run("INSERT INTO requests (kind, start_date, end_date, employee_id, reason, "
@@ -602,6 +646,7 @@ def page_request_off(user):
                 (req["start_date"], req["end_date"], user["id"], req["reason"], now_text()))
             email_managers(f"Request off: {user['name']} {nice_range(req)}", describe(req))
             notice("success", "Sent. A manager will approve or deny it — check My requests.")
+            st.session_state.pick_start = st.session_state.pick_end = None
             st.session_state.off_round = rnd + 1
             st.rerun()
 
