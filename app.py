@@ -3,10 +3,10 @@
 next to the printed schedule.
 
 What it does:
-  - Staff pick their name from a list and type the 4-digit code Joe gave them.
+  - Staff pick their name from a list and type the 4-digit code a manager gave them.
   - They can ask for days off, or offer a shift to a coworker.
-  - A shift trade goes to the coworker first. Only once they accept does it go to Joe.
-  - Joe gets an email for every request waiting on him, logs in through the
+  - A shift trade goes to the coworker first. Only once they accept does it go to a manager.
+  - The managers get an email for every request waiting on them, log in through the
     separate "Manager login" (real username + password), and approves or denies.
 
 Safety:
@@ -52,7 +52,7 @@ LOCK_MINUTES = 15      # how long the lock lasts
 STATUS = {
     "waiting_coworker": ("Waiting on coworker", "#AE834A"),
     "coworker_declined": ("Coworker said no", "#8a8a8a"),
-    "waiting_joe": ("Waiting on Joe", "#AE834A"),
+    "waiting_joe": ("Waiting on manager", "#AE834A"),
     "approved": ("Approved", "#2e7d32"),
     "denied": ("Denied", "#c62828"),
     "cancelled": ("Cancelled", "#8a8a8a"),
@@ -147,27 +147,42 @@ USING_ONLINE_DB = bool(DATABASE_URL)
 TEST_DB_FILE = os.path.join(tempfile.gettempdir(), "1913_staff_requests_TEST.db")
 
 
-def connect():
-    if USING_ONLINE_DB:
-        import psycopg  # only needed online; Windows on the laptop blocks it
-        return psycopg.connect(DATABASE_URL)
-    return sqlite3.connect(TEST_DB_FILE)
+@st.cache_resource
+def online_connection():
+    """Open ONE line to the online database and keep it open for everyone.
+    (Before, every single lookup dialed a fresh connection — that was the slowness.)"""
+    import psycopg  # only needed online; Windows on the laptop blocks it
+    return psycopg.connect(DATABASE_URL, autocommit=True)
+
+
+def _execute(conn, sql, params, fetch):
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    rows = []
+    if fetch:
+        names = [c[0] for c in cur.description]
+        rows = [dict(zip(names, r)) for r in cur.fetchall()]
+    conn.commit()
+    return rows
 
 
 def run(sql, params=(), fetch=False):
     """Run one database command. Returns rows as a list of dicts when fetch=True."""
-    if not USING_ONLINE_DB:
-        sql = sql.replace("%s", "?")
-    conn = connect()
+    if USING_ONLINE_DB:
+        conn = online_connection()
+        try:
+            return _execute(conn, sql, params, fetch)
+        except Exception:
+            # The database naps after a few quiet minutes and drops the line.
+            # If that's what happened, dial again once and retry. Otherwise it's a real error.
+            if not (conn.closed or conn.broken):
+                raise
+            online_connection.clear()
+            return _execute(online_connection(), sql, params, fetch)
+    # Laptop test copy: a local file, fast enough to open each time.
+    conn = sqlite3.connect(TEST_DB_FILE)
     try:
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        rows = []
-        if fetch:
-            names = [c[0] for c in cur.description]
-            rows = [dict(zip(names, r)) for r in cur.fetchall()]
-        conn.commit()
-        return rows
+        return _execute(conn, sql.replace("%s", "?"), params, fetch)
     finally:
         conn.close()
 
@@ -204,7 +219,7 @@ def create_tables():
 
 
 def make_first_manager():
-    """If nobody is a manager yet, create Joe's login from the secrets."""
+    """If nobody is a manager yet, create the first manager login from the secrets."""
     if run("SELECT id FROM employees WHERE role = 'manager'", fetch=True):
         return
     username = get_secret("MANAGER_USERNAME").strip().lower()
@@ -212,11 +227,11 @@ def make_first_manager():
     if username and password:
         run("INSERT INTO employees (name, username, pw_hash, role, must_change_pw) "
             "VALUES (%s, %s, %s, 'manager', 1)",
-            ("Joe", username, scramble(password)))
+            ("Manager", username, scramble(password)))
 
 
 # ---------------------------------------------------------------------------
-# Codes and passwords — stored scrambled, so nobody (Joe included) can read them.
+# Codes and passwords — stored scrambled, so nobody (managers included) can read them.
 # ---------------------------------------------------------------------------
 def scramble(secret):
     return bcrypt.hashpw(secret.encode(), bcrypt.gensalt()).decode()
@@ -237,7 +252,7 @@ def is_code(text):
 def try_login(person, secret):
     """Check a code/password, counting wrong tries. Returns (ok, message)."""
     if person["locked_until"] and person["locked_until"] > now_text():
-        return False, "Too many wrong tries. Wait 15 minutes or ask Joe to reset your code."
+        return False, "Too many wrong tries. Wait 15 minutes or ask a manager to reset your code."
     if matches(secret, person["pw_hash"]):
         run("UPDATE employees SET failed_tries = 0, locked_until = NULL WHERE id = %s",
             (person["id"],))
@@ -247,21 +262,21 @@ def try_login(person, secret):
         until = (datetime.now() + timedelta(minutes=LOCK_MINUTES)).strftime("%Y-%m-%d %H:%M")
         run("UPDATE employees SET failed_tries = 0, locked_until = %s WHERE id = %s",
             (until, person["id"]))
-        return False, "Too many wrong tries. Wait 15 minutes or ask Joe to reset your code."
+        return False, "Too many wrong tries. Wait 15 minutes or ask a manager to reset your code."
     run("UPDATE employees SET failed_tries = %s WHERE id = %s", (tries, person["id"]))
     return False, f"That's not right. {MAX_TRIES - tries} tries left."
 
 
 # ---------------------------------------------------------------------------
-# Alert email to Joe
+# Alert email to the managers
 # ---------------------------------------------------------------------------
-def email_joe(subject, body):
-    """Send Joe an alert. If email isn't set up, just say so on screen."""
+def email_managers(subject, body):
+    """Send the managers an alert. If email isn't set up, just say so on screen."""
     user = get_secret("GMAIL_USER")
     app_pw = get_secret("GMAIL_APP_PASSWORD").replace(" ", "")
     to = get_secret("ALERT_TO")
     if not (user and app_pw and to):
-        st.info("(Email to Joe is not set up on this copy, so no alert was sent.)")
+        st.info("(Email alerts are not set up on this copy, so no alert was sent.)")
         return
     link = get_secret("APP_URL")
     msg = EmailMessage()
@@ -275,8 +290,8 @@ def email_joe(subject, body):
             s.login(user, app_pw)
             s.send_message(msg)
     except Exception as e:
-        # The request is already saved; Joe will still see it when he logs in.
-        st.warning(f"Your request was saved, but the alert email to Joe failed: {e}")
+        # The request is already saved; managers will still see it when they log in.
+        st.warning(f"Your request was saved, but the alert email to the manager failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -305,9 +320,14 @@ def nice_range(req):
     return f"{nice_date(req['start_date'])} – {nice_date(req['end_date'])}"
 
 
+_NAMES = None  # everyone's name, looked up once per screen instead of once per row
+
+
 def name_of(emp_id):
-    rows = run("SELECT name FROM employees WHERE id = %s", (emp_id,), fetch=True)
-    return rows[0]["name"] if rows else "?"
+    global _NAMES
+    if _NAMES is None:
+        _NAMES = {r["id"]: r["name"] for r in run("SELECT id, name FROM employees", fetch=True)}
+    return _NAMES.get(emp_id, "?")
 
 
 def staff_list(exclude_id=None):
@@ -345,7 +365,7 @@ def request_card(req, viewer_id=None, extra_note=""):
     if req.get("reason"):
         html += f'<div class="muted">“{escape(req["reason"])}”</div>'
     if req.get("manager_note"):
-        html += f'<div class="muted"><b>Joe:</b> {escape(req["manager_note"])}</div>'
+        html += f'<div class="muted"><b>Manager:</b> {escape(req["manager_note"])}</div>'
     if extra_note:
         html += f'<div class="muted">{escape(extra_note)}</div>'
     st.markdown(html, unsafe_allow_html=True)
@@ -400,7 +420,7 @@ def login_screen():
 
 
 def change_password_form(user, forced):
-    """Manager-only: change Joe's real password."""
+    """Manager-only: change your own password."""
     if forced:
         st.markdown(f"### Welcome, {user['name']}")
         st.write("Pick your own password before you go on.")
@@ -448,7 +468,7 @@ def page_request_off(user):
         last = st.date_input("Last day off (same day if just one)", value=next_open_day(),
                              min_value=date.today(), format="MM/DD/YYYY")
         reason = st.text_input("Reason (optional)")
-        if st.form_submit_button("Send to Joe", type="primary", width="stretch"):
+        if st.form_submit_button("Send to manager", type="primary", width="stretch"):
             if last < first:
                 st.error("Last day is before the first day.")
             elif not any((first + timedelta(n)).weekday() in OPEN_DAYS
@@ -460,8 +480,8 @@ def page_request_off(user):
                 run("INSERT INTO requests (kind, start_date, end_date, employee_id, reason, "
                     "status, created_at) VALUES ('off', %s, %s, %s, %s, 'waiting_joe', %s)",
                     (req["start_date"], req["end_date"], user["id"], req["reason"], now_text()))
-                email_joe(f"Request off: {user['name']} {nice_range(req)}", describe(req))
-                st.success("Sent. Joe will approve or deny it — check My requests.")
+                email_managers(f"Request off: {user['name']} {nice_range(req)}", describe(req))
+                st.success("Sent. A manager will approve or deny it — check My requests.")
 
 
 def page_trade(user):
@@ -481,7 +501,7 @@ def page_trade(user):
         who = st.selectbox("Who is taking it?", list(names), index=None,
                            placeholder="Pick a coworker")
         note = st.text_input("Note (optional)", key="trade_note")
-        st.markdown('<p class="muted">They have to accept it before it goes to Joe. '
+        st.markdown('<p class="muted">They have to accept it before it goes to a manager. '
                     'Tell them to log in and check “Shifts offered to me.”</p>',
                     unsafe_allow_html=True)
         if st.button("Send offer", type="primary", width="stretch",
@@ -507,7 +527,7 @@ def page_offers(user):
             col_yes, col_no = st.columns(2)
             if col_yes.button("Accept", key=f"acc{req['id']}", type="primary", width="stretch"):
                 run("UPDATE requests SET status = 'waiting_joe' WHERE id = %s", (req["id"],))
-                email_joe(f"Shift trade: {name_of(req['employee_id'])} → {user['name']} "
+                email_managers(f"Shift trade: {name_of(req['employee_id'])} → {user['name']} "
                           f"{nice_range(req)}", describe(req) + f"\n{user['name']} accepted.")
                 st.rerun()
             if col_no.button("Decline", key=f"dec{req['id']}", width="stretch"):
@@ -544,7 +564,7 @@ def manager_screen(user):
     tab_pending, tab_all, tab_staff = st.tabs(
         [f"Waiting on you ({len(pending)})", "History", "Staff"])
 
-    # --- Requests waiting on Joe --------------------------------------------
+    # --- Requests waiting on a manager----------------------------------------
     with tab_pending:
         if not pending:
             st.write("Nothing waiting on you.")
@@ -625,6 +645,32 @@ def manager_screen(user):
                         (0 if emp["active"] else 1, emp["id"]))
                     st.rerun()
 
+        # --- Managers: anyone here can approve/deny and manage staff ---------
+        st.markdown("#### Managers")
+        managers = run("SELECT name, username FROM employees WHERE role = 'manager' "
+                       "AND active = 1 ORDER BY name", fetch=True)
+        st.markdown('<p class="muted">' + ", ".join(
+            f"{escape(m['name'])} ({escape(m['username'])})" for m in managers) + "</p>",
+            unsafe_allow_html=True)
+        with st.expander("Add a manager"):
+            with st.form("add_manager", clear_on_submit=True):
+                m_name = st.text_input("Their name").strip()
+                m_user = st.text_input("Username they'll log in with").strip().lower()
+                m_pw = st.text_input("Temporary password (8+ characters)", type="password")
+                st.markdown('<p class="muted">They pick their own password the first time '
+                            'they log in.</p>', unsafe_allow_html=True)
+                if st.form_submit_button("Add manager", type="primary"):
+                    if not (m_name and m_user):
+                        st.error("Fill in a name and a username.")
+                    elif len(m_pw) < 8:
+                        st.error("Temporary password needs at least 8 characters.")
+                    elif run("SELECT id FROM employees WHERE username = %s", (m_user,), fetch=True):
+                        st.error("That username is taken. Pick another.")
+                    else:
+                        run("INSERT INTO employees (name, username, pw_hash, role, must_change_pw) "
+                            "VALUES (%s, %s, %s, 'manager', 1)", (m_name, m_user, scramble(m_pw)))
+                        st.success(f"{m_name} can now use Manager login as '{m_user}'.")
+
         with st.expander("Change my manager password"):
             change_password_form(user, forced=False)
 
@@ -632,9 +678,16 @@ def manager_screen(user):
 # ---------------------------------------------------------------------------
 # Start here
 # ---------------------------------------------------------------------------
+@st.cache_resource
+def setup_once():
+    """Check the tables and first manager once when the site starts, not on every tap."""
+    create_tables()
+    make_first_manager()
+    return True
+
+
 apply_style()
-create_tables()
-make_first_manager()
+setup_once()
 
 if not USING_ONLINE_DB:
     st.warning("TEST COPY — using a throwaway file on this computer, not the real database.")

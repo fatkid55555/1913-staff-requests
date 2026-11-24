@@ -2,8 +2,8 @@
 
 Employees scan the QR code next to the printed schedule, log in, and either
 ask for days off or offer a shift to a coworker. Trades go to the coworker
-first; once they accept (or for any day-off request) Joe gets an email and
-approves or denies on the Manager screen.
+first; once they accept (or for any day-off request) the managers get an email
+and approve or deny on the Manager screen.
 
 ## Files
 - `app.py` — the whole website (Streamlit).
@@ -21,8 +21,11 @@ approves or denies on the Manager screen.
   `ALERT_TO`, `APP_URL`.
 
 ## Logging in
-- **Staff:** pick their name from the list, type the 4-digit code Joe gave them.
-- **Joe:** tap "Manager login" at the bottom, real username + password.
+- **Staff:** pick their name from the list, type the 4-digit code a manager gave them.
+- **Managers:** tap "Manager login" at the bottom, real username + password.
+  Add another manager on Manager screen → Staff → Add a manager (they pick
+  their own password on first login). Alert emails go to every address in
+  the `ALERT_TO` secret, comma-separated.
 - 5 wrong tries on one name locks it for 15 minutes. Codes are stored
   scrambled — they can't be looked up, only replaced.
 
